@@ -144,70 +144,70 @@ app.delete('/wishlist', verifySession, async (req, res) => {
     }
 });
 
-// app.post('/library', verifySession, async (req, res) => {
-//     const { userId, userEmail, gameId, game } = req.body;
-//     if (!userId || !gameId || !game) {
-//         return res.status(400).send({ message: "userId, gameId, and game details are required" });
-//     }
-//     try {
-//         const query = { userId, gameId };
-//         const exists = await libraryCollection.findOne(query);
-//         if (exists) {
-//             return res.status(409).send({ message: "Game already owned in library" });
-//         }
+app.post('/library', verifySession, async (req, res) => {
+    const { userId, userEmail, gameId, game } = req.body;
+    if (!userId || !gameId || !game) {
+        return res.status(400).send({ message: "userId, gameId, and game details are required" });
+    }
+    try {
+        const query = { userId, gameId };
+        const exists = await libraryCollection.findOne(query);
+        if (exists) {
+            return res.status(409).send({ message: "Game already owned in library" });
+        }
 
-//         const newLibraryItem = {
-//             userId,
-//             userEmail,
-//             gameId,
-//             game,
-//             downloadStatus: "not downloaded",
-//             purchasedAt: new Date()
-//         };
-//         const result = await libraryCollection.insertOne(newLibraryItem);
-//         await wishlistCollection.deleteOne({ userId, gameId });
-//         res.status(201).send(result);
-//     } catch (error) {
-//         console.error("Error adding to library:", error);
-//         res.status(500).send({ message: "Failed to add to library" });
-//     }
-// });
+        const newLibraryItem = {
+            userId,
+            userEmail,
+            gameId,
+            game,
+            downloadStatus: "not downloaded",
+            purchasedAt: new Date()
+        };
+        const result = await libraryCollection.insertOne(newLibraryItem);
+        await wishlistCollection.deleteOne({ userId, gameId });
+        res.status(201).send(result);
+    } catch (error) {
+        console.error("Error adding to library:", error);
+        res.status(500).send({ message: "Failed to add to library" });
+    }
+});
 
-// app.patch('/library/download', verifySession, async (req, res) => {
-//     const { userId, gameId, downloadStatus } = req.body;
-//     if (!userId || !gameId || !downloadStatus) {
-//         return res.status(400).send({ message: "userId, gameId, and downloadStatus are required" });
-//     }
-//     try {
-//         const filter = { userId, gameId };
-//         const update = {
-//             $set: { downloadStatus }
-//         };
-//         const result = await libraryCollection.updateOne(filter, update);
-//         if (result.matchedCount === 0) {
-//             return res.status(404).send({ message: "Library item not found" });
-//         }
-//         res.send({ success: true, message: "Download status updated successfully", result });
-//     } catch (error) {
-//         console.error("Error updating download status:", error);
-//         res.status(500).send({ message: "Failed to update download status" });
-//     }
-// });
+app.patch('/library/download', verifySession, async (req, res) => {
+    const { userId, gameId, downloadStatus } = req.body;
+    if (!userId || !gameId || !downloadStatus) {
+        return res.status(400).send({ message: "userId, gameId, and downloadStatus are required" });
+    }
+    try {
+        const filter = { userId, gameId };
+        const update = {
+            $set: { downloadStatus }
+        };
+        const result = await libraryCollection.updateOne(filter, update);
+        if (result.matchedCount === 0) {
+            return res.status(404).send({ message: "Library item not found" });
+        }
+        res.send({ success: true, message: "Download status updated successfully", result });
+    } catch (error) {
+        console.error("Error updating download status:", error);
+        res.status(500).send({ message: "Failed to update download status" });
+    }
+});
 
-// app.get('/library', verifySession, async (req, res) => {
-//     const { userId } = req.query;
-//     if (!userId) {
-//         return res.status(400).send({ message: "userId query parameter is required" });
-//     }
-//     try {
-//         const query = { userId: String(userId) };
-//         const result = await libraryCollection.find(query).sort({ purchasedAt: -1 }).toArray();
-//         res.send(result);
-//     } catch (error) {
-//         console.error("Error retrieving library:", error);
-//         res.status(500).send({ message: "Failed to retrieve library" });
-//     }
-// });
+app.get('/library', verifySession, async (req, res) => {
+    const { userId } = req.query;
+    if (!userId) {
+        return res.status(400).send({ message: "userId query parameter is required" });
+    }
+    try {
+        const query = { userId: String(userId) };
+        const result = await libraryCollection.find(query).sort({ purchasedAt: -1 }).toArray();
+        res.send(result);
+    } catch (error) {
+        console.error("Error retrieving library:", error);
+        res.status(500).send({ message: "Failed to retrieve library" });
+    }
+});
 
 // app.post('/reviews', verifySession, async (req, res) => {
 //     const { gameId, userId, author, rating, comment } = req.body;
