@@ -423,54 +423,54 @@ app.get('/', (req, res) => {
 //     }
 // });
 
-app.get('/my-games', verifySession, async (req, res) => {
-    const { userId } = req.query;
-    if (!userId) {
-        return res.status(400).send({ message: "userId query parameter is required" });
-    }
+// app.get('/my-games', verifySession, async (req, res) => {
+//     const { userId } = req.query;
+//     if (!userId) {
+//         return res.status(400).send({ message: "userId query parameter is required" });
+//     }
+//     try {
+//         const query = { "creator.id": String(userId) };
+//         const result = await gamesCollection.find(query).sort({ createdAt: -1 }).toArray();
+//         res.send(result);
+//     } catch (error) {
+//         console.error("Error retrieving my games:", error);
+//         res.status(500).send({ message: "Failed to retrieve games" });
+//     }
+// });
+
+app.put('/games/:id', verifySession, async (req, res) => {
+    const { id } = req.params;
+    const updateInfo = req.body;
     try {
-        const query = { "creator.id": String(userId) };
-        const result = await gamesCollection.find(query).sort({ createdAt: -1 }).toArray();
-        res.send(result);
+        const filter = { _id: new ObjectId(id) };
+        const update = {
+            $set: updateInfo
+        };
+        const result = await gamesCollection.updateOne(filter, update);
+        if (result.matchedCount === 0) {
+            return res.status(404).send({ message: "Game not found" });
+        }
+        res.send({ success: true, message: "Game updated successfully", result });
     } catch (error) {
-        console.error("Error retrieving my games:", error);
-        res.status(500).send({ message: "Failed to retrieve games" });
+        console.error("Error updating game:", error);
+        res.status(500).send({ message: "Failed to update game" });
     }
 });
 
-// app.put('/games/:id', verifySession, async (req, res) => {
-//     const { id } = req.params;
-//     const updateInfo = req.body;
-//     try {
-//         const filter = { _id: new ObjectId(id) };
-//         const update = {
-//             $set: updateInfo
-//         };
-//         const result = await gamesCollection.updateOne(filter, update);
-//         if (result.matchedCount === 0) {
-//             return res.status(404).send({ message: "Game not found" });
-//         }
-//         res.send({ success: true, message: "Game updated successfully", result });
-//     } catch (error) {
-//         console.error("Error updating game:", error);
-//         res.status(500).send({ message: "Failed to update game" });
-//     }
-// });
-
-// app.delete('/games/:id', verifySession, async (req, res) => {
-//     const { id } = req.params;
-//     try {
-//         const filter = { _id: new ObjectId(id) };
-//         const result = await gamesCollection.deleteOne(filter);
-//         if (result.deletedCount === 0) {
-//             return res.status(404).send({ message: "Game not found" });
-//         }
-//         res.send({ success: true, message: "Game deleted successfully", result });
-//     } catch (error) {
-//         console.error("Error deleting game:", error);
-//         res.status(500).send({ message: "Failed to delete game" });
-//     }
-// });
+app.delete('/games/:id', verifySession, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const filter = { _id: new ObjectId(id) };
+        const result = await gamesCollection.deleteOne(filter);
+        if (result.deletedCount === 0) {
+            return res.status(404).send({ message: "Game not found" });
+        }
+        res.send({ success: true, message: "Game deleted successfully", result });
+    } catch (error) {
+        console.error("Error deleting game:", error);
+        res.status(500).send({ message: "Failed to delete game" });
+    }
+});
 
 app.listen(port, () => {
     console.log(`Example app listening on port ${port}`)
