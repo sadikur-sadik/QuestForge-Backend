@@ -409,34 +409,34 @@ app.get('/', (req, res) => {
 //     }
 // });
 
-app.post('/games', verifySession, async (req, res) => {
-    const game = req.body;
-    game.createdAt = new Date();
-    game.rating = 5.0;
-    game.releaseDate = new Date().toISOString().split("T")[0];
-    try {
-        const result = await gamesCollection.insertOne(game);
-        res.status(201).send(result);
-    } catch (error) {
-        console.error("Error inserting game:", error);
-        res.status(500).send({ message: "Failed to add game" });
-    }
-});
-
-// app.get('/my-games', verifySession, async (req, res) => {
-//     const { userId } = req.query;
-//     if (!userId) {
-//         return res.status(400).send({ message: "userId query parameter is required" });
-//     }
+// app.post('/games', verifySession, async (req, res) => {
+//     const game = req.body;
+//     game.createdAt = new Date();
+//     game.rating = 5.0;
+//     game.releaseDate = new Date().toISOString().split("T")[0];
 //     try {
-//         const query = { "creator.id": String(userId) };
-//         const result = await gamesCollection.find(query).sort({ createdAt: -1 }).toArray();
-//         res.send(result);
+//         const result = await gamesCollection.insertOne(game);
+//         res.status(201).send(result);
 //     } catch (error) {
-//         console.error("Error retrieving my games:", error);
-//         res.status(500).send({ message: "Failed to retrieve games" });
+//         console.error("Error inserting game:", error);
+//         res.status(500).send({ message: "Failed to add game" });
 //     }
 // });
+
+app.get('/my-games', verifySession, async (req, res) => {
+    const { userId } = req.query;
+    if (!userId) {
+        return res.status(400).send({ message: "userId query parameter is required" });
+    }
+    try {
+        const query = { "creator.id": String(userId) };
+        const result = await gamesCollection.find(query).sort({ createdAt: -1 }).toArray();
+        res.send(result);
+    } catch (error) {
+        console.error("Error retrieving my games:", error);
+        res.status(500).send({ message: "Failed to retrieve games" });
+    }
+});
 
 // app.put('/games/:id', verifySession, async (req, res) => {
 //     const { id } = req.params;
