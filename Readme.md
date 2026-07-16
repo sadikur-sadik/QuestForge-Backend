@@ -1,16 +1,3 @@
-The markdown headings and formatting are not rendering correctly because of two
-issues in your file:
-
-1.  Introductory text: The conversational sentence ("Here is a professional and
-    structured...") was pasted at the very top of your README.md file, which can
-    disrupt some markdown parsers.
-2.  Unclosed code blocks: In the Installation and Setup section, some of the
-    code blocks (starting with ```) were not closed with a matching ``` at the
-    end, causing the remaining text to be parsed incorrectly.
-
-To fix this, edit your README.md file, remove everything currently in it, and
-replace it entirely with the raw markdown code block below:
-
 # QuestForge-Backend
 
 QuestForge-Backend is a Node.js and Express-based REST API designed to power the QuestForge digital gaming platform. It provides endpoints for managing a game directory, user libraries, wishlists, customer reviews, and session-based authentication using MongoDB.
