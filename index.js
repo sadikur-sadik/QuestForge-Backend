@@ -38,7 +38,7 @@ const verifySession = async (req, res, next) => {
         const cookiesList = req.headers.cookie.split(';');
         for (let c of cookiesList) {
             const [k, v] = c.trim().split('=');
-            if (k === "better-auth.session_token") {
+            if (k === "better-auth.session_token" || k === "__secure-better-auth.session_token") {
                 token = v;
                 break;
             }
