@@ -34,7 +34,46 @@ const libraryCollection = db.collection("library");
 const reviewsCollection = db.collection("reviews");
 const sessionCollection = db.collection("session");
 
+const verifySession = async (req: any, res: any, next: any) => {
+    let token = null;
+    const authHeader = req.headers.authorization || req.headers.Authorization;
 
+    if (authHeader && authHeader.toString().startsWith("Bearer ")) {
+        token = authHeader.toString().split(" ")[1];
+    }
+
+    // Fallback: try parsing session token cookie
+    if (!token && req.headers.cookie) {
+        const cookiesList = req.headers.cookie.split(';');
+        for (let c of cookiesList) {
+            const [k, v] = c.trim().split('=');
+            if (k === "better-auth.session_token") {
+                token = v;
+                break;
+            }
+        }
+    }
+
+    if (!token) {
+        return res.status(401).send({ message: "Unauthorized: Missing or invalid token" });
+    }
+
+    try {
+        const session = await sessionCollection.findOne({ token });
+        if (!session) {
+            return res.status(401).send({ message: "Unauthorized: Invalid session" });
+        }
+        if (new Date(session.expiresAt) < new Date()) {
+            return res.status(401).send({ message: "Unauthorized: Session expired" });
+        }
+        req.session = session;
+        req.userId = session.userId.toString();
+        next();
+    } catch (error) {
+        console.error("Session verification error:", error);
+        res.status(500).send({ message: "Internal Server Error in authentication" });
+    }
+};
 
 app.get('/', (req, res) => {
     res.send('Hello World!')
