@@ -453,4 +453,5 @@ app.delete('/games/:id', verifySession, async (req, res) => {
 app.listen(port, () => {
     console.log(`Example app listening on port ${port}`);
 });
+export default app;
 //# sourceMappingURL=index.js.map
