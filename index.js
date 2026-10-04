@@ -27,6 +27,8 @@ const wishlistCollection = db.collection("wishlist");
 const libraryCollection = db.collection("library");
 const reviewsCollection = db.collection("reviews");
 const sessionCollection = db.collection("session");
+const userCollection = db.collection("user");
+const roleRequestsCollection = db.collection("role_requests");
 const verifySession = async (req, res, next) => {
     let token = null;
     const authHeader = req.headers.authorization || req.headers.Authorization;
@@ -448,6 +450,126 @@ app.delete('/games/:id', verifySession, async (req, res) => {
     catch (error) {
         console.error("Error deleting game:", error);
         res.status(500).send({ message: "Failed to delete game" });
+    }
+});
+// User submits role change request (non-admin only, cannot request admin)
+app.post('/role-request', verifySession, async (req, res) => {
+    const { requestedRole, userId, userName, userEmail } = req.body;
+    const sessionUserId = req.userId || userId;
+    if (!sessionUserId || !requestedRole) {
+        return res.status(400).send({ message: "UserId and requestedRole are required" });
+    }
+    try {
+        let currentUser = null;
+        try {
+            currentUser = await userCollection.findOne({ _id: new ObjectId(sessionUserId) });
+        }
+        catch (e) { }
+        const currentRole = currentUser?.role || "buyer";
+        if (currentRole === "admin") {
+            return res.status(400).send({ message: "Administrators do not need to request role changes." });
+        }
+        // Strictly disallow requesting Admin role
+        if (requestedRole === "admin") {
+            return res.status(403).send({ message: "You cannot request to become an Administrator." });
+        }
+        if (!["buyer", "seller"].includes(requestedRole)) {
+            return res.status(400).send({ message: "Invalid role requested. Must be buyer or seller." });
+        }
+        if (requestedRole === currentRole) {
+            return res.status(400).send({ message: `Your active account role is already ${currentRole.toUpperCase()}.` });
+        }
+        const newRequest = {
+            userId: sessionUserId,
+            userName: userName || currentUser?.name || "User",
+            userEmail: userEmail || currentUser?.email || "",
+            currentRole,
+            requestedRole,
+            status: "pending",
+            createdAt: new Date(),
+            updatedAt: new Date()
+        };
+        const result = await roleRequestsCollection.updateOne({ userId: sessionUserId, status: "pending" }, { $set: newRequest }, { upsert: true });
+        res.status(201).send({
+            success: true,
+            message: `Role change request to ${requestedRole.toUpperCase()} submitted for Admin approval.`,
+            result
+        });
+    }
+    catch (error) {
+        console.error("Error submitting role change request:", error);
+        res.status(500).send({ message: "Failed to submit role change request" });
+    }
+});
+// User retrieves active pending role request
+app.get('/role-request', verifySession, async (req, res) => {
+    const { userId } = req.query;
+    const queryUserId = req.userId || String(userId);
+    if (!queryUserId) {
+        return res.status(400).send({ message: "userId query parameter is required" });
+    }
+    try {
+        const pendingRequest = await roleRequestsCollection.findOne({
+            userId: String(queryUserId),
+            status: "pending"
+        });
+        res.send({ request: pendingRequest || null });
+    }
+    catch (error) {
+        console.error("Error fetching role request:", error);
+        res.status(500).send({ message: "Failed to fetch role request" });
+    }
+});
+// Admin retrieves all role requests
+app.get('/admin/role-requests', verifySession, async (req, res) => {
+    try {
+        const adminUser = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+        if (adminUser?.role !== "admin") {
+            return res.status(403).send({ message: "Forbidden: Administrator access required" });
+        }
+        const requests = await roleRequestsCollection.find().sort({ createdAt: -1 }).toArray();
+        res.send({ requests: requests || [] });
+    }
+    catch (error) {
+        console.error("Error retrieving role requests:", error);
+        res.status(500).send({ message: "Failed to retrieve role requests" });
+    }
+});
+// Admin approves or rejects role request
+app.post('/admin/role-requests/action', verifySession, async (req, res) => {
+    const { requestId, action } = req.body;
+    if (!requestId || !["approve", "reject"].includes(action)) {
+        return res.status(400).send({ message: "requestId and valid action (approve/reject) are required" });
+    }
+    try {
+        const adminUser = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+        if (adminUser?.role !== "admin") {
+            return res.status(403).send({ message: "Forbidden: Administrator access required" });
+        }
+        const roleReqDoc = await roleRequestsCollection.findOne({ _id: new ObjectId(requestId) });
+        if (!roleReqDoc) {
+            return res.status(404).send({ message: "Role request not found" });
+        }
+        if (action === "approve") {
+            // Update user role in MongoDB user collection
+            await userCollection.updateOne({ _id: new ObjectId(roleReqDoc.userId) }, { $set: { role: roleReqDoc.requestedRole, updatedAt: new Date() } });
+            await roleRequestsCollection.updateOne({ _id: new ObjectId(requestId) }, { $set: { status: "approved", approvedAt: new Date() } });
+            res.send({
+                success: true,
+                message: `Request approved! User role changed to ${roleReqDoc.requestedRole.toUpperCase()}.`
+            });
+        }
+        else {
+            await roleRequestsCollection.updateOne({ _id: new ObjectId(requestId) }, { $set: { status: "rejected", rejectedAt: new Date() } });
+            res.send({
+                success: true,
+                message: "Role request rejected."
+            });
+        }
+    }
+    catch (error) {
+        console.error("Error processing role request action:", error);
+        res.status(500).send({ message: "Failed to process role request action" });
     }
 });
 app.listen(port, () => {
