@@ -35,6 +35,7 @@ const reviewsCollection = db.collection("reviews");
 const sessionCollection = db.collection("session");
 const userCollection = db.collection("user");
 const roleRequestsCollection = db.collection("role_requests");
+const ordersCollection = db.collection("orders");
 
 const verifySession = async (req: any, res: any, next: any) => {
     let token = null;
@@ -624,6 +625,169 @@ app.post('/admin/role-requests/action', verifySession, async (req: any, res: any
     } catch (error) {
         console.error("Error processing role request action:", error);
         res.status(500).send({ message: "Failed to process role request action" });
+    }
+});
+
+// Buyer submits an Order Request for a Game
+app.post('/orders', verifySession, async (req: any, res: any) => {
+    const { gameId, gameTitle, gameCoverUrl, price, buyerId, buyerName, buyerEmail, sellerId, sellerEmail } = req.body;
+    const sessionUserId = req.userId || buyerId;
+
+    if (!gameId || !sessionUserId) {
+        return res.status(400).send({ message: "gameId and buyer details are required" });
+    }
+
+    try {
+        // Check if buyer already owns this game
+        const alreadyOwned = await libraryCollection.findOne({ userId: String(sessionUserId), gameId: String(gameId) });
+        if (alreadyOwned) {
+            return res.status(400).send({ message: "You already own this game in your library." });
+        }
+
+        // Check if pending order already exists
+        const existingPending = await ordersCollection.findOne({
+            buyerId: String(sessionUserId),
+            gameId: String(gameId),
+            status: "pending"
+        });
+        if (existingPending) {
+            return res.status(400).send({ message: "An order request for this game is already pending seller delivery." });
+        }
+
+        let targetSellerId = sellerId;
+        let targetSellerEmail = sellerEmail;
+        try {
+            const gameDoc = await gamesCollection.findOne({ _id: new ObjectId(gameId) });
+            if (gameDoc?.creator?.id) {
+                targetSellerId = gameDoc.creator.id;
+                targetSellerEmail = gameDoc.creator.email || targetSellerEmail;
+            }
+        } catch (e) {}
+
+        const newOrder = {
+            gameId: String(gameId),
+            gameTitle: gameTitle || "Game Listing",
+            gameCoverUrl: gameCoverUrl || "",
+            price: Number(price) || 0,
+            buyerId: String(sessionUserId),
+            buyerName: buyerName || "Buyer",
+            buyerEmail: buyerEmail || "",
+            sellerId: targetSellerId || "all_sellers",
+            sellerEmail: targetSellerEmail || "",
+            status: "pending",
+            licenseKey: null,
+            orderedAt: new Date(),
+            updatedAt: new Date()
+        };
+
+        const result = await ordersCollection.insertOne(newOrder);
+        const createdOrder = { ...newOrder, _id: result.insertedId };
+        res.status(201).send({
+            success: true,
+            message: `Order request placed successfully! Awaiting seller delivery.`,
+            orderId: result.insertedId,
+            order: createdOrder
+        });
+    } catch (error) {
+        console.error("Error creating order:", error);
+        res.status(500).send({ message: "Failed to place order request" });
+    }
+});
+
+// Retrieve orders (by buyerId or sellerId or all for seller dashboard)
+app.get('/orders', verifySession, async (req: any, res: any) => {
+    const { buyerId, sellerId } = req.query;
+    try {
+        const query: any = {};
+        if (buyerId) {
+            query.buyerId = String(buyerId);
+        } else if (sellerId) {
+            query.$or = [
+                { sellerId: String(sellerId) },
+                { sellerId: "all_sellers" }
+            ];
+        }
+
+        const orders = await ordersCollection.find(query).sort({ orderedAt: -1 }).toArray();
+        res.send(orders || []);
+    } catch (error) {
+        console.error("Error retrieving orders:", error);
+        res.status(500).send({ message: "Failed to retrieve orders" });
+    }
+});
+
+// Seller delivers the order by providing a License Key
+app.patch('/orders/:id/deliver', verifySession, async (req: any, res: any) => {
+    const { id } = req.params;
+    const { licenseKey, deliveryNotes } = req.body;
+
+    try {
+        let orderDoc: any = null;
+        try {
+            orderDoc = await ordersCollection.findOne({ _id: new ObjectId(id) });
+        } catch (e) {
+            orderDoc = await ordersCollection.findOne({ _id: id as any });
+        }
+
+        if (!orderDoc) {
+            return res.status(404).send({ message: "Order not found" });
+        }
+
+        if (orderDoc.status === "delivered") {
+            return res.status(400).send({ message: "Order has already been delivered." });
+        }
+
+        const generatedKey = licenseKey && licenseKey.trim()
+            ? licenseKey.trim()
+            : `QF-${Math.random().toString(36).substring(2, 7).toUpperCase()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+
+        // Update order status to delivered
+        await ordersCollection.updateOne(
+            { _id: orderDoc._id },
+            {
+                $set: {
+                    status: "delivered",
+                    licenseKey: generatedKey,
+                    deliveryNotes: deliveryNotes || "Delivered by Seller",
+                    deliveredAt: new Date(),
+                    updatedAt: new Date()
+                }
+            }
+        );
+
+        // Add game directly to buyer's library vault
+        const libraryItem = {
+            userId: orderDoc.buyerId,
+            userEmail: orderDoc.buyerEmail,
+            gameId: orderDoc.gameId,
+            game: {
+                id: orderDoc.gameId,
+                title: orderDoc.gameTitle,
+                coverUrl: orderDoc.gameCoverUrl,
+                price: orderDoc.price
+            },
+            licenseKey: generatedKey,
+            downloadStatus: "not downloaded",
+            purchasedAt: new Date()
+        };
+
+        await libraryCollection.updateOne(
+            { userId: orderDoc.buyerId, gameId: orderDoc.gameId },
+            { $set: libraryItem },
+            { upsert: true }
+        );
+
+        // Clean up buyer's wishlist if present
+        await wishlistCollection.deleteOne({ userId: orderDoc.buyerId, gameId: orderDoc.gameId });
+
+        res.send({
+            success: true,
+            message: `Order delivered successfully! License key: ${generatedKey}`,
+            licenseKey: generatedKey
+        });
+    } catch (error) {
+        console.error("Error delivering order:", error);
+        res.status(500).send({ message: "Failed to deliver order" });
     }
 });
 
