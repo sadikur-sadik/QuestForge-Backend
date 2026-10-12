@@ -212,6 +212,82 @@ app.get('/library', verifySession, async (req, res) => {
     }
 });
 
+const updateGameRating = async (gameId: string) => {
+    try {
+        const stats = await reviewsCollection.aggregate([
+            { $match: { gameId: String(gameId) } },
+            {
+                $group: {
+                    _id: "$gameId",
+                    avgRating: { $avg: "$rating" },
+                    reviewsCount: { $sum: 1 }
+                }
+            }
+        ]).toArray();
+
+        let rating = 0;
+        let reviewsCount = 0;
+        if (stats.length > 0) {
+            rating = Math.round(stats[0].avgRating * 10) / 10;
+            reviewsCount = stats[0].reviewsCount;
+        }
+
+        let gQuery: any = {};
+        try {
+            gQuery = { _id: new ObjectId(gameId) };
+        } catch {
+            gQuery = { _id: gameId };
+        }
+
+        await gamesCollection.updateOne(
+            gQuery,
+            { $set: { rating, reviewsCount } }
+        );
+    } catch (e) {
+        console.error("Error updating game rating:", e);
+    }
+};
+
+const syncAllGameRatings = async () => {
+    try {
+        const stats = await reviewsCollection.aggregate([
+            {
+                $group: {
+                    _id: "$gameId",
+                    avgRating: { $avg: "$rating" },
+                    reviewsCount: { $sum: 1 }
+                }
+            }
+        ]).toArray();
+
+        const statsMap = new Map();
+        stats.forEach((s: any) => {
+            if (s._id) {
+                statsMap.set(String(s._id), {
+                    rating: Math.round(s.avgRating * 10) / 10,
+                    reviewsCount: s.reviewsCount
+                });
+            }
+        });
+
+        const games = await gamesCollection.find().toArray();
+        for (const game of games) {
+            const idStr = game._id.toString();
+            const stat = statsMap.get(idStr);
+            const rating = stat ? stat.rating : 0;
+            const reviewsCount = stat ? stat.reviewsCount : 0;
+            if (game.rating !== rating || game.reviewsCount !== reviewsCount) {
+                await gamesCollection.updateOne(
+                    { _id: game._id },
+                    { $set: { rating, reviewsCount } }
+                );
+            }
+        }
+    } catch (err) {
+        console.error("Failed to sync game ratings:", err);
+    }
+};
+
 app.post('/reviews', verifySession, async (req, res) => {
     const { gameId, userId, author, rating, comment } = req.body;
     if (!gameId || !userId || !author || !rating || !comment) {
@@ -233,6 +309,7 @@ app.post('/reviews', verifySession, async (req, res) => {
             createdAt: new Date()
         };
         const result = await reviewsCollection.insertOne(newReview);
+        await updateGameRating(gameId);
         res.status(201).send(result);
     } catch (error) {
         console.error("Error adding review:", error);
@@ -241,13 +318,10 @@ app.post('/reviews', verifySession, async (req, res) => {
 });
 
 app.get('/reviews', async (req, res) => {
-    const { gameId, userId } = req.query;
-    if (!gameId && !userId) {
-        return res.status(400).send({ message: "Either gameId or userId query parameter is required" });
-    }
+    const { gameId, userId, limit } = req.query;
 
-    // Verify session for user reviews queries
-    if (userId) {
+    // Verify session only for specific user reviews queries if requested
+    if (userId && !gameId) {
         const authHeader = req.headers.authorization || req.headers.Authorization;
         if (!authHeader || !authHeader.toString().startsWith("Bearer ")) {
             return res.status(401).send({ message: "Unauthorized: Missing or invalid token" });
@@ -268,34 +342,66 @@ app.get('/reviews', async (req, res) => {
         if (gameId) query.gameId = String(gameId);
         if (userId) query.userId = String(userId);
 
-        const reviews = await reviewsCollection.find(query).sort({ createdAt: -1 }).toArray();
-
-        // If we are getting reviews for a user, enrich them with game details
-        if (userId) {
-            const enrichedReviews = await Promise.all(
-                reviews.map(async (review) => {
-                    let gameDetails = null;
-                    try {
-                        if (review.gameId) {
-                            gameDetails = await gamesCollection.findOne({ _id: new ObjectId(review.gameId) });
-                        }
-                    } catch (e) {
-                        // ignore invalid ObjectIds or database query errors
-                    }
-                    return {
-                        ...review,
-                        game: gameDetails ? {
-                            title: gameDetails.title,
-                            coverUrl: gameDetails.coverUrl,
-                            genre: gameDetails.genre
-                        } : null
-                    };
-                })
-            );
-            return res.send(enrichedReviews);
+        let cursor = reviewsCollection.find(query).sort({ createdAt: -1 });
+        if (limit) {
+            cursor = cursor.limit(parseInt(String(limit), 10));
         }
 
-        res.send(reviews);
+        const reviews = await cursor.toArray();
+
+        // Enrich reviews with both game details and user info
+        const enrichedReviews = await Promise.all(
+            reviews.map(async (review) => {
+                let gameDetails = null;
+                try {
+                    if (review.gameId) {
+                        gameDetails = await gamesCollection.findOne({ _id: new ObjectId(review.gameId) });
+                    }
+                } catch (e) {
+                    // ignore invalid ObjectIds or database query errors
+                }
+
+                let userDetails = null;
+                try {
+                    if (review.userId) {
+                        let uQuery: any = {};
+                        try {
+                            uQuery = { _id: new ObjectId(review.userId) };
+                        } catch (e) {
+                            uQuery = { _id: review.userId };
+                        }
+                        userDetails = await userCollection.findOne(uQuery);
+                        if (!userDetails) {
+                            userDetails = await userCollection.findOne({ id: review.userId });
+                        }
+                    }
+                } catch (e) {
+                    // ignore invalid ObjectIds
+                }
+
+                return {
+                    ...review,
+                    author: userDetails?.name || review.author || "Community Player",
+                    user: userDetails ? {
+                        id: userDetails._id ? userDetails._id.toString() : userDetails.id,
+                        name: userDetails.name,
+                        email: userDetails.email,
+                        image: userDetails.image,
+                        role: userDetails.role
+                    } : null,
+                    userImage: userDetails?.image || null,
+                    userRole: userDetails?.role || null,
+                    game: gameDetails ? {
+                        id: gameDetails._id.toString(),
+                        title: gameDetails.title,
+                        coverUrl: gameDetails.coverUrl,
+                        genre: gameDetails.genre
+                    } : null
+                };
+            })
+        );
+
+        res.send(enrichedReviews);
     } catch (error) {
         console.error("Error retrieving reviews:", error);
         res.status(500).send({ message: "Failed to retrieve reviews" });
@@ -310,6 +416,10 @@ app.put('/reviews/:id', verifySession, async (req, res) => {
     }
     try {
         const filter = { _id: new ObjectId(id) };
+        const existingReview = await reviewsCollection.findOne(filter);
+        if (!existingReview) {
+            return res.status(404).send({ message: "Review not found" });
+        }
         const update = {
             $set: {
                 rating: Number(rating),
@@ -318,9 +428,7 @@ app.put('/reviews/:id', verifySession, async (req, res) => {
             }
         };
         const result = await reviewsCollection.updateOne(filter, update);
-        if (result.matchedCount === 0) {
-            return res.status(404).send({ message: "Review not found" });
-        }
+        await updateGameRating(existingReview.gameId);
         res.send({ success: true, message: "Review updated successfully", result });
     } catch (error) {
         console.error("Error updating review:", error);
@@ -332,10 +440,12 @@ app.delete('/reviews/:id', verifySession, async (req, res) => {
     const { id } = req.params;
     try {
         const filter = { _id: new ObjectId(id) };
-        const result = await reviewsCollection.deleteOne(filter);
-        if (result.deletedCount === 0) {
+        const existingReview = await reviewsCollection.findOne(filter);
+        if (!existingReview) {
             return res.status(404).send({ message: "Review not found" });
         }
+        const result = await reviewsCollection.deleteOne(filter);
+        await updateGameRating(existingReview.gameId);
         res.send({ success: true, message: "Review deleted successfully", result });
     } catch (error) {
         console.error("Error deleting review:", error);
@@ -373,7 +483,7 @@ app.get('/games', async (req, res) => {
     } else if (query.sort === 'price-desc') {
         sortOptions = { price: -1 };
     } else if (query.sort === 'rating') {
-        sortOptions = { rating: -1 };
+        sortOptions = { rating: -1, reviewsCount: -1, createdAt: -1 };
     } else {
         // Default: Sort by newest first
         sortOptions = { createdAt: -1 };
@@ -415,7 +525,8 @@ app.get('/games/:id', async (req, res) => {
 app.post('/games', verifySession, async (req, res) => {
     const game = req.body;
     game.createdAt = new Date();
-    game.rating = 5.0;
+    game.rating = 0;
+    game.reviewsCount = 0;
     game.releaseDate = new Date().toISOString().split("T")[0];
     try {
         const result = await gamesCollection.insertOne(game);
@@ -694,18 +805,65 @@ app.post('/orders', verifySession, async (req: any, res: any) => {
     }
 });
 
-// Retrieve orders (by buyerId or sellerId or all for seller dashboard)
+// Helper function for dynamic timeline buckets (supports 7d, 30d, 6m, 1y)
+function generateTimelineBuckets(timeRange: string = "6m") {
+    const buckets: Array<{ key: string; label: string; month: string; start: Date; end: Date }> = [];
+    const now = new Date();
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    if (timeRange === "7d") {
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+            const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
+            const end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+            const label = `${monthNames[d.getMonth()]} ${d.getDate()}`;
+            const key = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+            buckets.push({ key, label, month: label, start, end });
+        }
+    } else if (timeRange === "30d") {
+        for (let i = 29; i >= 0; i -= 5) {
+            const dStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+            const dEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - Math.max(0, i - 4), 23, 59, 59, 999);
+            const label = `${monthNames[dStart.getMonth()]} ${dStart.getDate()}`;
+            const key = `w-${i}`;
+            buckets.push({ key, label, month: label, start: dStart, end: dEnd });
+        }
+    } else if (timeRange === "1y") {
+        for (let i = 11; i >= 0; i--) {
+            const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59, 999);
+            const label = `${monthNames[start.getMonth()]} ${start.getFullYear()}`;
+            const key = `${start.getFullYear()}-${start.getMonth()}`;
+            buckets.push({ key, label, month: label, start, end });
+        }
+    } else {
+        // default 6m
+        for (let i = 5; i >= 0; i--) {
+            const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59, 999);
+            const label = `${monthNames[start.getMonth()]} ${start.getFullYear()}`;
+            const key = `${start.getFullYear()}-${start.getMonth()}`;
+            buckets.push({ key, label, month: label, start, end });
+        }
+    }
+    return buckets;
+}
+
+// Retrieve orders (by buyerId/buyerEmail or sellerId/sellerEmail or all for seller dashboard)
 app.get('/orders', verifySession, async (req: any, res: any) => {
-    const { buyerId, sellerId } = req.query;
+    const { buyerId, buyerEmail, sellerId, sellerEmail } = req.query;
     try {
         const query: any = {};
-        if (buyerId) {
-            query.buyerId = String(buyerId);
-        } else if (sellerId) {
-            query.$or = [
-                { sellerId: String(sellerId) },
-                { sellerId: "all_sellers" }
-            ];
+        if (buyerId || buyerEmail) {
+            const orConditions: any[] = [];
+            if (buyerId) orConditions.push({ buyerId: String(buyerId) });
+            if (buyerEmail) orConditions.push({ buyerEmail: String(buyerEmail) });
+            query.$or = orConditions;
+        } else if (sellerId || sellerEmail) {
+            const orConditions: any[] = [{ sellerId: "all_sellers" }];
+            if (sellerId) orConditions.push({ sellerId: String(sellerId) });
+            if (sellerEmail) orConditions.push({ sellerEmail: String(sellerEmail) });
+            query.$or = orConditions;
         }
 
         const orders = await ordersCollection.find(query).sort({ orderedAt: -1 }).toArray();
@@ -713,6 +871,302 @@ app.get('/orders', verifySession, async (req: any, res: any) => {
     } catch (error) {
         console.error("Error retrieving orders:", error);
         res.status(500).send({ message: "Failed to retrieve orders" });
+    }
+});
+
+// Platform Dynamic Analytics (Recharts endpoint)
+app.get('/analytics', async (req: any, res: any) => {
+    const timeRange = (req.query.timeRange as string) || "6m";
+    try {
+        const users = await userCollection.find().toArray();
+        const sales = await libraryCollection.find().toArray();
+        const games = await gamesCollection.find().toArray();
+        const orders = await ordersCollection.find().toArray();
+
+        const buyerUsers = users.filter((u: any) => !u.role || u.role === "buyer");
+        const sellerUsers = users.filter((u: any) => u.role === "seller");
+        const adminUsers = users.filter((u: any) => u.role === "admin");
+
+        // Compute total revenue and genre breakdown directly from real database records
+        let totalRevenue = 0;
+        const genreRevenueMap: Record<string, number> = {};
+        const genreCountMap: Record<string, number> = {};
+
+        const countedOrderKeys = new Set<string>();
+
+        sales.forEach((sale: any) => {
+            const price = Number(sale.game?.price) || 0;
+            totalRevenue += price;
+            const genre = sale.game?.genre || "Uncategorized";
+            genreRevenueMap[genre] = (genreRevenueMap[genre] || 0) + price;
+            genreCountMap[genre] = (genreCountMap[genre] || 0) + 1;
+            if (sale.gameId) countedOrderKeys.add(`${sale.userId}_${sale.gameId}`);
+        });
+
+        // Also add delivered orders not already represented in library collection
+        orders.filter((o: any) => o.status === "delivered").forEach((ord: any) => {
+            const key = `${ord.buyerId}_${ord.gameId}`;
+            if (!countedOrderKeys.has(key)) {
+                const price = Number(ord.price) || 0;
+                totalRevenue += price;
+                const genre = "Uncategorized";
+                genreRevenueMap[genre] = (genreRevenueMap[genre] || 0) + price;
+                genreCountMap[genre] = (genreCountMap[genre] || 0) + 1;
+                countedOrderKeys.add(key);
+            }
+        });
+
+        // Generate dynamic timeline buckets for Recharts
+        const buckets = generateTimelineBuckets(timeRange);
+
+        const monthlyStats = buckets.map(b => {
+            const bBuyers = buyerUsers.filter((u: any) => {
+                if (!u.createdAt) return false;
+                const d = new Date(u.createdAt);
+                return d >= b.start && d <= b.end;
+            }).length;
+
+            const bSellers = sellerUsers.filter((u: any) => {
+                if (!u.createdAt) return false;
+                const d = new Date(u.createdAt);
+                return d >= b.start && d <= b.end;
+            }).length;
+
+            const bSales = sales.filter((s: any) => {
+                const d = s.purchasedAt ? new Date(s.purchasedAt) : (s.createdAt ? new Date(s.createdAt) : null);
+                return d ? (d >= b.start && d <= b.end) : false;
+            });
+
+            const bOrders = orders.filter((o: any) => {
+                const d = o.orderedAt ? new Date(o.orderedAt) : (o.createdAt ? new Date(o.createdAt) : null);
+                return d ? (d >= b.start && d <= b.end) : false;
+            });
+
+            const salesCount = bSales.length + bOrders.length;
+            const revenue = bSales.reduce((acc: number, curr: any) => acc + (Number(curr.game?.price) || 0), 0) +
+                            bOrders.filter((o: any) => o.status === "delivered").reduce((acc: number, curr: any) => acc + (Number(curr.price) || 0), 0);
+
+            return {
+                month: b.label,
+                label: b.label,
+                buyers: bBuyers,
+                sellers: bSellers,
+                salesCount,
+                revenue: Number(revenue.toFixed(2))
+            };
+        });
+
+        const genreBreakdown = Object.entries(genreRevenueMap).map(([name, value]) => ({
+            name,
+            value: Number(value.toFixed(2)),
+            count: genreCountMap[name] || 0
+        }));
+
+        // Dynamic User Roles Pie Chart dataset (No static fallbacks)
+        const userRolesPieData = [
+            { name: "Buyer Accounts", value: buyerUsers.length, color: "#10b981" },
+            { name: "Seller Accounts", value: sellerUsers.length, color: "#f59e0b" },
+            { name: "Admin Accounts", value: adminUsers.length, color: "#8b5cf6" },
+        ];
+
+        const recentBuyers = buyerUsers.map((u: any) => ({
+            id: u._id.toString(),
+            name: u.name || u.email?.split("@")[0] || "Buyer Account",
+            email: u.email || "",
+            role: "buyer",
+            createdAt: u.createdAt ? new Date(u.createdAt).toISOString() : new Date().toISOString()
+        }));
+
+        const recentSellers = sellerUsers.map((u: any) => ({
+            id: u._id.toString(),
+            name: u.name || u.email?.split("@")[0] || "Seller Account",
+            email: u.email || "",
+            role: "seller",
+            createdAt: u.createdAt ? new Date(u.createdAt).toISOString() : new Date().toISOString()
+        }));
+
+        const recentSales = sales.map((s: any) => ({
+            id: s._id.toString(),
+            gameTitle: s.game?.title || "Game Purchase",
+            userEmail: s.userEmail || "Buyer",
+            price: Number(s.game?.price) || 0,
+            purchasedAt: s.purchasedAt ? new Date(s.purchasedAt).toISOString() : (s.createdAt ? new Date(s.createdAt).toISOString() : new Date().toISOString())
+        }));
+
+        res.send({
+            summary: {
+                totalRevenue: Number(totalRevenue.toFixed(2)),
+                totalSalesCount: sales.length + orders.length,
+                totalBuyers: buyerUsers.length,
+                totalSellers: sellerUsers.length,
+                totalAdmins: adminUsers.length,
+                totalGames: games.length
+            },
+            monthlyStats,
+            genreBreakdown,
+            userRolesPieData,
+            recentBuyers,
+            recentSellers,
+            recentSales
+        });
+    } catch (error: any) {
+        console.error("Error generating analytics:", error);
+        res.status(500).send({ message: "Failed to generate analytics data" });
+    }
+});
+
+// Seller-Specific Dynamic Analytics (Recharts endpoint)
+app.get('/analytics/seller', async (req: any, res: any) => {
+    const { sellerId, sellerEmail, timeRange = "6m" } = req.query;
+    try {
+        const queryGames: any = {};
+        if (sellerId || sellerEmail) {
+            const orList: any[] = [];
+            if (sellerId) orList.push({ "creator.id": String(sellerId) });
+            if (sellerEmail) orList.push({ "creator.email": String(sellerEmail) });
+            queryGames.$or = orList;
+        }
+
+        const myGames = await gamesCollection.find(queryGames).toArray();
+
+        // Find orders for this seller
+        const orderOr: any[] = [{ sellerId: "all_sellers" }];
+        if (sellerId) orderOr.push({ sellerId: String(sellerId) });
+        if (sellerEmail) orderOr.push({ sellerEmail: String(sellerEmail) });
+        const orders = await ordersCollection.find({ $or: orderOr }).sort({ orderedAt: -1 }).toArray();
+
+        // Find library purchases for this seller's games
+        const gameIds = myGames.map((g: any) => g._id.toString());
+        const libOr: any[] = [];
+        if (gameIds.length > 0) libOr.push({ gameId: { $in: gameIds } });
+        if (sellerId) libOr.push({ "game.creator.id": String(sellerId) });
+        if (sellerEmail) libOr.push({ "game.creator.email": String(sellerEmail) });
+
+        const libSales = libOr.length > 0 ? await libraryCollection.find({ $or: libOr }).toArray() : [];
+
+        const deliveredOrders = orders.filter((o: any) => o.status === "delivered");
+        const pendingOrders = orders.filter((o: any) => o.status === "pending");
+
+        const orderRevenue = deliveredOrders.reduce((acc: number, o: any) => acc + (Number(o.price) || 0), 0);
+        const libRevenue = libSales.reduce((acc: number, s: any) => acc + (Number(s.game?.price) || 0), 0);
+        const totalSalesRevenue = Number((orderRevenue + libRevenue).toFixed(2));
+
+        // Generate timeline buckets
+        const buckets = generateTimelineBuckets(timeRange as string);
+        const monthlySalesData = buckets.map(b => {
+            const bOrders = orders.filter((o: any) => {
+                const d = o.orderedAt ? new Date(o.orderedAt) : (o.createdAt ? new Date(o.createdAt) : null);
+                return d ? (d >= b.start && d <= b.end) : false;
+            });
+            const bSales = libSales.filter((s: any) => {
+                const d = s.purchasedAt ? new Date(s.purchasedAt) : (s.createdAt ? new Date(s.createdAt) : null);
+                return d ? (d >= b.start && d <= b.end) : false;
+            });
+
+            const count = bOrders.length + bSales.length;
+            const rev = bOrders.filter((o: any) => o.status === "delivered").reduce((acc: number, o: any) => acc + (Number(o.price) || 0), 0) +
+                        bSales.reduce((acc: number, s: any) => acc + (Number(s.game?.price) || 0), 0);
+
+            return {
+                month: b.label,
+                orders: count,
+                revenue: Number(rev.toFixed(2))
+            };
+        });
+
+        // Genre breakdown of seller's published games
+        const genreCounts: Record<string, number> = {};
+        myGames.forEach((g: any) => {
+            const cat = g.genre || "Other";
+            genreCounts[cat] = (genreCounts[cat] || 0) + 1;
+        });
+
+        const COLOR_PALETTE = ["#10b981", "#f59e0b", "#8b5cf6", "#06b6d4", "#ec4899", "#3b82f6", "#ef4444"];
+        const genrePieData = Object.keys(genreCounts).map((key, idx) => ({
+            name: key,
+            value: genreCounts[key],
+            color: COLOR_PALETTE[idx % COLOR_PALETTE.length]
+        }));
+
+        res.send({
+            totalGamesCount: myGames.length,
+            totalSalesRevenue,
+            pendingOrdersCount: pendingOrders.length,
+            deliveredOrdersCount: deliveredOrders.length,
+            monthlySalesData,
+            genrePieData,
+            ordersList: orders
+        });
+    } catch (error: any) {
+        console.error("Error generating seller analytics:", error);
+        res.status(500).send({ message: "Failed to generate seller analytics" });
+    }
+});
+
+// Buyer-Specific Dynamic Analytics (Recharts endpoint)
+app.get('/analytics/buyer', async (req: any, res: any) => {
+    const { buyerId, buyerEmail, timeRange = "6m" } = req.query;
+    try {
+        const libOr: any[] = [];
+        if (buyerId) libOr.push({ userId: String(buyerId) });
+        if (buyerEmail) libOr.push({ userEmail: String(buyerEmail) });
+        const libraryItems = libOr.length > 0 ? await libraryCollection.find({ $or: libOr }).toArray() : [];
+
+        const orderOr: any[] = [];
+        if (buyerId) orderOr.push({ buyerId: String(buyerId) });
+        if (buyerEmail) orderOr.push({ buyerEmail: String(buyerEmail) });
+        const orders = orderOr.length > 0 ? await ordersCollection.find({ $or: orderOr }).sort({ orderedAt: -1 }).toArray() : [];
+
+        const totalSpent = Number((
+            libraryItems.reduce((acc: number, item: any) => acc + (Number(item.game?.price) || 0), 0)
+        ).toFixed(2));
+
+        const buckets = generateTimelineBuckets(timeRange as string);
+        const monthlySpendingData = buckets.map(b => {
+            const bLib = libraryItems.filter((item: any) => {
+                const d = item.purchasedAt ? new Date(item.purchasedAt) : (item.createdAt ? new Date(item.createdAt) : null);
+                return d ? (d >= b.start && d <= b.end) : false;
+            });
+
+            const bOrders = orders.filter((ord: any) => {
+                const d = ord.orderedAt ? new Date(ord.orderedAt) : (ord.createdAt ? new Date(ord.createdAt) : null);
+                return d ? (d >= b.start && d <= b.end) : false;
+            });
+
+            const spent = bLib.reduce((acc: number, item: any) => acc + (Number(item.game?.price) || 0), 0);
+            const count = bOrders.length > 0 ? bOrders.length : bLib.length;
+
+            return {
+                month: b.label,
+                spent: Number(spent.toFixed(2)),
+                orders: count
+            };
+        });
+
+        const genreCounts: Record<string, number> = {};
+        libraryItems.forEach((item: any) => {
+            const cat = item.game?.genre || "Action";
+            genreCounts[cat] = (genreCounts[cat] || 0) + 1;
+        });
+
+        const COLOR_PALETTE = ["#10b981", "#06b6d4", "#8b5cf6", "#f59e0b", "#ec4899", "#3b82f6", "#ef4444"];
+        const genrePieData = Object.keys(genreCounts).map((key, idx) => ({
+            name: key,
+            value: genreCounts[key],
+            color: COLOR_PALETTE[idx % COLOR_PALETTE.length]
+        }));
+
+        res.send({
+            totalSpent,
+            libraryCount: libraryItems.length,
+            ordersCount: orders.length,
+            monthlySpendingData,
+            genrePieData,
+            ordersList: orders
+        });
+    } catch (error: any) {
+        console.error("Error generating buyer analytics:", error);
+        res.status(500).send({ message: "Failed to generate buyer analytics" });
     }
 });
 
